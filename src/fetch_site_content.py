@@ -8,56 +8,64 @@ import time
 
 start_time = time.time()
 
+connection = psycopg2.connect(user="public_read",
+                              password="pass",
+                              host="127.0.0.1",
+                              port="5432",
+                              database="news.google.com")
+cursor = connection.cursor()
+
 
 def main():
 
 
     try:
-        connection = psycopg2.connect(user="public_read",
-                                      password="pass",
-                                      host="127.0.0.1",
-                                      port="5432",
-                                      database="news.google.com")
-        cursor = connection.cursor()
-
         query = '''
-            SELECT t.id, t.link
-            FROM search_results.gnews_topics as t
-            /*
-            LEFT JOIN search_results.queries as q ON q.ref_topic_id = t.id
-            LEFT JOIN search_results.documents as d ON d.ref_topic_id = t.id
-            WHERE d.status_code not in (200)
-            */
+            SELECT t.id , t.link, t.status_code 
+              FROM search_results.gnews_topics as t
+              LEFT join search_results.documents AS d ON d.id = t.ref_document_id
+             WHERE t.is_complete = false 
+               AND t.status_code <= 200
+             ORDER BY id DESC;
         '''
-
         cursor.execute(query)
         jobs = cursor.fetchall()
-
-        for document in jobs:
-
-            getRequest = requests.get('https://' + document[1])
+        for topic in jobs:
+            query = '''
+                UPDATE search_results.gnews_topics
+                   SET is_complete = true,
+                       status_code = 404
+                 WHERE id = %s;
+            '''
+            cursor.execute(query, [
+                topic[0],
+            ])
+            connection.commit()
+            getRequest = requests.get('https://' + topic[1], timeout=3)
             parsed_html = BeautifulSoup(getRequest.text, 'lxml')
             tmp = parsed_html.body.find_all('p')
             sentences = [sentence.text for sentence in tmp]
             query = '''
-                INSERT INTO search_results.documents
-                   (html_cache, html_hash, ref_topic_id, status_code)
-                VALUES
-                    (%s,%s,%s,%s);
-                SELECT currval('search_results.documents_id_seq');
+                INSERT INTO search_results.documents (html_cache, html_hash, ref_topic_id)
+                VALUES (%s,%s,%s);
+                 
+                UPDATE search_results.gnews_topics
+                   SET is_complete = true,
+                       status_code = %s
+                 WHERE id = %s;
+                 
+                SELECT currval('search_results.documents_id_seq');  
             '''
-            record = {
-                'html_hash': hashlib.md5(document[1].encode('utf-8')).hexdigest()
-            }
-            cursor.execute(query, [' ,'.join(sentences), record['html_hash'], document[0], getRequest.status_code])
+            cursor.execute(query, [
+                ' ,'.join(sentences),
+                hashlib.md5(topic[1].encode('utf-8')).hexdigest(),
+                topic[0],
+                getRequest.status_code,
+                topic[0],
+            ])
             new_id = cursor.fetchall()
-            query = '''
-                UPDATE search_results.gnews_topics SET ref_document_id = %s where id = %s;
-            '''
-            id = new_id[0]
-            id2 = id[0]
-            cursor.execute(query, [id2, document[0]])
-
+            connection.commit()
+            print(cursor.rowcount)
             print(new_id)
 
 
